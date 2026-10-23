@@ -15,7 +15,7 @@ from winsor import optimal_w, optimal_w_params, winsorize_n_bm
 L = 100
 _rng = random.Random(1)
 x = [_rng.gauss(1, 1) for _ in range(L)]
-bm = L
+bm = float(L)
 
 
 def winsorize(v, bm, bottom, top, scale=None):
@@ -71,7 +71,7 @@ def test_false_positive_outliers_scale_low():
 
 
 def test_optimal_w_no_winsorization():
-    assert opt_w(x, L) == x
+    assert opt_w(x, bm) == x
 
 
 @pytest.mark.xfail(
@@ -79,24 +79,27 @@ def test_optimal_w_no_winsorization():
     "can be just as close to the benchmark"
 )
 def test_optimal_w_winsorizes_both():
-    assert opt_w([-100, *x, 100], L) == [min(x), *x, max(x)]
+    assert opt_w([-100, *x, 100], bm) == [min(x), *x, max(x)]
 
 
 def test_optimal_w_winsorizes_bottom():
-    assert opt_w([-100, *x], L) == [min(x), *x]
+    assert opt_w([-100, *x], bm) == [min(x), *x]
 
 
 ### beyond tests.R
 
 
 def ref_winsorize(v, bm, bottom, top, scale=None):
-    """Line-by-line port of R winsorize_n_bm (no NA values); None for NA."""
+    """Port of R winsorize_n_bm (no NA values); None for NA. Unlike R,
+    clamping every value (bottom + top >= n) is rejected."""
     if scale is None:
         scale = len(v) ** -0.25
-    s = sorted(v)
-    bottom_value, top_value = s[bottom], s[len(s) - 1 - top]
     if bm is None or (bottom == 0 and top == 0):
         return list(v)
+    s = sorted(v)
+    if bottom + top >= len(s):
+        return None
+    bottom_value, top_value = s[bottom], s[len(s) - 1 - top]
     if bottom > 0 and abs(s[bottom - 1]) < scale * bm:
         return None
     if top > 0 and abs(s[len(s) - top]) < scale * bm:
@@ -130,7 +133,7 @@ def random_groups(seed, n_groups, step):
             vals[rng.randrange(n)] = rng.choice([-1, 1]) * rng.uniform(20, 400)
         if rng.random() < 0.3:  # heavy ties
             vals = [round(e) for e in vals]
-        vals = [round(e / step) * step for e in vals]
+        vals = [float(round(e / step) * step) for e in vals]
         bench = rng.choice(
             [None, 0.0, -50.0, float(round(sum(vals) + rng.gauss(0, 30)))]
             + [float(round(rng.uniform(0, 3) * n))] * 4
@@ -141,7 +144,52 @@ def random_groups(seed, n_groups, step):
 
 @pytest.mark.parametrize("step", [1, 0.25, 2**-20])
 def test_optimal_w_matches_reference(step):
-    df = random_groups(seed=step, n_groups=400, step=step)
+    assert_matches_reference(random_groups(seed=step, n_groups=400, step=step))
+
+
+def test_optimal_w_matches_reference_large_groups():
+    # Big enough groups that the first pass's cutoffs actually drop rows,
+    # including groups with only a few distinct values.
+    rng = random.Random(5)
+    rows = []
+    for g in range(30):
+        n = rng.choice([200, 1000, 2000])
+        if g % 3 == 0:
+            vals = [float(rng.randint(0, 4)) for _ in range(n)]
+        else:
+            vals = [round(rng.gauss(1, 1) * 1024) / 1024 for _ in range(n)]
+        for _ in range(rng.choice([0, 1, 3, 12])):
+            vals[rng.randrange(n)] = float(rng.choice([-1, 1]) * rng.randint(200, 5000))
+        bench = rng.choice([float(n), 0.0, float(round(sum(vals)))])
+        rows += [(g, e, bench) for e in vals]
+    assert_matches_reference(pl.DataFrame(rows, schema=["g", "value", "bm"], orient="row"))
+
+
+def test_cutoff_keeps_just_enough_values():
+    # optimal_w_params deals values into 16 piles by hash and cuts at the 11th
+    # smallest pile min. Here the 10 outliers and the smallest ordinary value
+    # are each the min of their own pile, so exactly 11 values make the cut,
+    # and the winning lower bound is the 11th.
+    def pile(x):
+        return pl.Series([x]).hash()[0] % 16
+
+    ordinary = [1 + i / 1024 for i in range(200)]
+    used = {pile(ordinary[0])}
+    outliers = []
+    x = -1000.0
+    while len(outliers) < 10:
+        if pile(x) not in used:
+            used.add(pile(x))
+            outliers.append(x)
+        x -= 1
+    values = outliers + ordinary
+    bm = 10 * ordinary[0] + sum(ordinary)  # what clamping all 10 outliers gives
+    lf = pl.LazyFrame({"g": 0, "value": values, "bm": bm})
+    params = optimal_w_params(lf, "value", "bm", "g").collect()
+    assert params.select("bottom", "top", "lower").row(0) == (10, 0, ordinary[0])
+
+
+def assert_matches_reference(df):
     got = optimal_w(df.lazy(), "value", "bm", "g").collect()
     params = optimal_w_params(df.lazy(), "value", "bm", "g").collect()
     picked = {g: (b, t) for g, b, t in params.select("g", "bottom", "top").iter_rows()}
@@ -161,9 +209,6 @@ def test_winsorize_matches_reference(bottom, top, scale):
     )
     for (g,), grp in got.group_by("g", maintain_order=True):
         v = grp["value"].to_list()
-        if len(v) <= max(bottom, top):  # R errors; polars gives null
-            assert grp["w"].is_null().all()
-            continue
         want = ref_winsorize(v, grp["bm"][0], bottom, top, scale)
         assert (None if grp["w"].is_null().all() else grp["w"].to_list()) == want
 
@@ -190,11 +235,11 @@ def test_equivalent_trims_tie_like_r():
 
 def test_groups_are_independent_and_order_kept():
     cases = [x, [-100, *x], [*x, 100], [5.0], [3.0, -400.0]]
-    single = [opt_w(v, L) for v in cases]
+    single = [opt_w(v, bm) for v in cases]
     df = pl.DataFrame(
         {"g": [f"g{i}" for i, v in enumerate(cases) for _ in v],
          "value": pl.Series([e for v in cases for e in v], dtype=pl.Float64),
-         "benchmark": L}
+         "benchmark": bm}
     ).sample(fraction=1, shuffle=True, seed=0)
     got = optimal_w(df.lazy(), "value", "benchmark", "g").collect()
     assert_frame_equal(got.drop("value_w"), df)
@@ -216,12 +261,15 @@ def test_multiple_group_columns_and_null_keys():
 def test_missing_values_leave_group_unchanged():
     nan = float("nan")
     df = pl.DataFrame(
-        {"g": [1] * 4 + [2] * 4 + [3] * 4,
-         "value": [1.0, 2.0, None, 500.0, 1.0, nan, 2.0, 500.0, 1.0, 2.0, 2.0, 500.0],
-         "bm": [5.0] * 4 + [5.0] * 4 + [None] * 4}
+        {"g": [1] * 4 + [2] * 4 + [3] * 4 + [4] * 2,
+         "value": [1.0, 2.0, None, 500.0, 1.0, nan, 2.0, 500.0, 1.0, 2.0, 2.0, 500.0,
+                   None, None],
+         "bm": [5.0] * 4 + [5.0] * 4 + [None] * 4 + [5.0] * 2}
     )
     got = optimal_w(df.lazy(), "value", "bm", "g").collect()
     assert_series_equal(got["value_w"], df["value"], check_names=False)
+    params = optimal_w_params(df.lazy(), "value", "bm", "g").collect().sort("g")
+    assert params.rows() == [(g, 0, 0, None, None) for g in [1, 2, 3, 4]]
 
 
 def test_winsorize_skips_missing_values():
