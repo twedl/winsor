@@ -169,15 +169,20 @@ def optimal_w_params(
     )
 
     # Second pass. Only rows past the cutoffs can be among a group's k
-    # smallest or largest values, and there are only a few of them, so
-    # bottom_k and top_k on what's left is cheap.
+    # smallest or largest values. Copies of a value all land in the same
+    # pile, so a value that shows up thousands of times (like 0) can all get
+    # past a cutoff. So we count each value first, which streams, and only
+    # repeat it up to k times going into bottom_k and top_k.
+    repeated = v.repeat_by(pl.col("_count").clip(upper_bound=k)).explode()
     extremes = (
         lf.join(stats.select(*by, "_low_cut", "_high_cut"), on=by, nulls_equal=True)
         .filter((v <= pl.col("_low_cut")) | (v >= pl.col("_high_cut")))
+        .group_by(*by, value)
+        .agg(_count=pl.len())
         .group_by(by)
         .agg(
-            _smallest=v.bottom_k(k).sort(),  # ascending
-            _largest=v.top_k(k).sort(descending=True),  # descending
+            _smallest=repeated.bottom_k(k).sort(),  # ascending
+            _largest=repeated.top_k(k).sort(descending=True),  # descending
         )
     )
     stats = stats.join(extremes, on=by, how="left", nulls_equal=True)

@@ -165,6 +165,21 @@ def test_optimal_w_matches_reference_large_groups():
     assert_matches_reference(pl.DataFrame(rows, schema=["g", "value", "bm"], orient="row"))
 
 
+def test_repeated_values_match_reference():
+    # Lots of zeros at the bottom and copies of an outlier at each end. Every
+    # copy of a value lands in the same pile, so they get past the cutoffs
+    # together and have to be counted rather than kept row by row.
+    rng = random.Random(9)
+    rows = []
+    for g in range(6):
+        vals = [0.0] * 2000 + [round(rng.uniform(0, 2) * 1024) / 1024 for _ in range(1000)]
+        vals[:g] = [-800.0] * g
+        vals[-5:] = [900.0] * 5
+        bm = rng.choice([float(round(sum(vals[g:-5]))), 0.0, 1000.0])
+        rows += [(g, e, bm) for e in vals]
+    assert_matches_reference(pl.DataFrame(rows, schema=["g", "value", "bm"], orient="row"))
+
+
 def test_cutoff_keeps_just_enough_values():
     # optimal_w_params deals values into 16 piles by hash and cuts at the 11th
     # smallest pile min. Here the 10 outliers and the smallest ordinary value
