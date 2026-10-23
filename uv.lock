@@ -105,7 +105,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "polars", specifier = ">=1.20" }]
+requires-dist = [{ name = "polars", specifier = ">=2" }]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8" }]

@@ -89,7 +89,8 @@ def optimal_w_params(
     ``(max_trim + 1) ** 2`` small candidate rows per group.
 
     Groups with any null or NaN `value` are left unchanged: in R these make
-    every candidate sum NA, so ``(0, 0)`` wins (or R errors).
+    every candidate sum NA, so ``(0, 0)`` wins (or R errors). Values are
+    assumed finite; the sums above are not valid with ±Inf.
 
     Returns one row per group: the `by` columns, ``bottom``, ``top`` and the
     clip bounds ``lower`` and ``upper``, which are null for groups that are

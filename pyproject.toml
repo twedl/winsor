@@ -3,7 +3,7 @@ name = "winsor"
 version = "0.1.0"
 description = "Benchmark-driven winsorization of grouped data in polars"
 requires-python = ">=3.11"
-dependencies = ["polars>=1.20"]
+dependencies = ["polars>=2"]
 
 [dependency-groups]
 dev = ["pytest>=8"]
